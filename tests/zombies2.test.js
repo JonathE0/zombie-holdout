@@ -25,7 +25,7 @@ function join(room, name = 'P') {
 }
 const started = room => { room.phase = 'prep'; return room; };
 
-test('zombies deal 65% damage to pieces, less still in a group, but the Core takes the full hit', () => {
+test('zombies deal 45% damage to pieces, less still in a group, but the Core takes the full hit', () => {
   const room = started(new HoldoutRoom('Z1', {}));
   const wall = room.addPiece({ kind: 'wall', ...tile(0, -8), l: 0, o: 0, mat: 'metal' }, null);
   wall.hp = 100000;
@@ -33,16 +33,16 @@ test('zombies deal 65% damage to pieces, less still in a group, but the Core tak
   let hp = wall.hp;
   room.damagePiece(wall, 100, zA);
   const solo = hp - wall.hp;
-  assert.ok(Math.abs(solo - 65) < 0.01, `one attacker should do 65% damage, did ${solo}`);
+  assert.ok(Math.abs(solo - 45) < 0.01, `one attacker should do 45% damage, did ${solo}`);
   hp = wall.hp;
   room.damagePiece(wall, 100, zB); // a second, distinct attacker within the 1.5s crowding window
   const group = hp - wall.hp;
-  assert.ok(Math.abs(group - 100 * 0.65 / 1.3) < 0.01, `two attackers: 65% / (1 + 0.3) = 50%, did ${group}`);
+  assert.ok(Math.abs(group - 100 * 0.45 / 1.45) < 0.01, `two attackers: 45% / (1 + 0.45) ≈ 31%, did ${group}`);
   assert.ok(group < solo, 'a group hit is weaker than a solo hit');
   T += 2000; // outside the 1.5s window: the piece forgets its hitters
   hp = wall.hp;
   room.damagePiece(wall, 100, zA);
-  assert.ok(Math.abs((hp - wall.hp) - 65) < 0.01, 'back to solo damage once the old hitters expire');
+  assert.ok(Math.abs((hp - wall.hp) - 45) < 0.01, 'back to solo damage once the old hitters expire');
   const core0 = room.core.hp;
   room.phase = 'wave';
   room.damageCore(100, null);

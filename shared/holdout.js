@@ -44,6 +44,11 @@ export const ITEMS = {
   flame: { name: 'Flame Grill', kind: 'trap', mount: 'floor', price: 450, max: 10 },
   turret: { name: 'Auto Turret', kind: 'deploy', mount: 'ground', price: 1800, max: 3 },
   rturret: { name: 'Rocket Turret', kind: 'deploy', mount: 'ground', price: 3000, max: 2 },
+  gturret: { name: 'Gatling Turret', kind: 'deploy', mount: 'ground', price: 1600, max: 3 },
+  frturret: { name: 'Frost Turret', kind: 'deploy', mount: 'ground', price: 1500, max: 3 },
+  flturret: { name: 'Flame Turret', kind: 'deploy', mount: 'ground', price: 1400, max: 3 },
+  tesla: { name: 'Tesla Coil', kind: 'deploy', mount: 'ground', price: 2200, max: 2 },
+  mortar: { name: 'Mortar', kind: 'deploy', mount: 'ground', price: 3500, max: 1 },
   campfire: { name: 'Rally Fire', kind: 'deploy', mount: 'ground', price: 400, max: 4 },
 };
 export const ITEM_IDS = Object.keys(ITEMS);
@@ -76,15 +81,26 @@ export const ARMOR = {
 };
 export const ARMOR_IDS = Object.keys(ARMOR);
 
-// How placed defenses behave (server/holdout/defenses.js).
+// How placed defenses behave (server/holdout/defenses.js). Turret family: turret/gturret/frturret/tesla
+// hitscan a single target, rturret/mortar launch a tracked rocket (server/holdout/combat.js), flturret
+// sprays a short cone. frturret/tesla/flturret always carry their element; the rest can be fitted with
+// the Blacksmith's incendiary/frost rounds.
 export const DEFENSES = {
   spikes: { uses: 90, tick: 0.5, dmg: 28, slow: 0.5 },
   darts: { uses: 70, tick: 0.6, dmg: 26, depth: 2.4 },
   flame: { uses: 45, tick: 1.4, dmg: 55, burn: 10, burnTime: 3 },
   turret: { hp: 350, range: 24, rate: 7, dmg: 13, ammo: 700 },
   rturret: { hp: 450, range: 30, rate: 1 / 3, dmg: 150, splash: 3.5, ammo: 30 },
+  gturret: { hp: 280, range: 20, rate: 16, dmg: 5, ammo: 1000 },
+  frturret: { hp: 300, range: 22, rate: 2.5, dmg: 9, ammo: 260 },
+  flturret: { hp: 260, range: 9, tick: 1, dmg: 40, burn: 9, burnTime: 3, cos: Math.cos((40 * Math.PI) / 180), ammo: 200 },
+  tesla: { hp: 320, range: 18, rate: 1, dmg: 26, ammo: 160 },
+  mortar: { hp: 420, range: 46, minRange: 10, rate: 1 / 5, dmg: 230, splash: 5, ammo: 20 },
   campfire: { life: 30, heal: 6, shield: 5, radius: 3.6 },
 };
+// turret-family ids that the Blacksmith's anvil can upgrade (dmg/range/rate/ammo/plate, and inc/frost
+// rounds on the ones without a built-in element)
+export const TURRET_TYPES = ['turret', 'rturret', 'gturret', 'frturret', 'flturret', 'tesla', 'mortar'];
 
 // The Core's own auto-turret, mounted on its roof (server/holdout/corecannon.js). Indestructible, unlimited
 // ammo, always active during waves. Upgraded at the Core shop's CORE tab: every purchase raises room.coreLevel
@@ -187,6 +203,29 @@ const lootGun = (rng, w, rw, elChance, t2 = 0, t3 = 0) => {
 const lootArmor = (rng, t2 = 0, t3 = 0) => ({ kind: 'armor', id: pick(rng, ARMOR_IDS), tier: rng() < t3 ? 3 : rng() < t2 ? 2 : 1 });
 const lootAttach = rng => ({ kind: 'item', id: pick(rng, ATTACH_IDS), n: 1 });
 
+// Loot odds for traps/turrets/deployables: one weight per item, roughly the inverse of its price/impact
+// so cheap traps are common and the big turrets are rare. Chests, supply drops, boss kills and elite/large
+// zombie kills (shared/zombies.js ZTYPES[...].deployOdds) all roll from this same table.
+export const DEPLOY_WEIGHT = {
+  spikes: 100, darts: 90, flame: 60, campfire: 55,
+  flturret: 22, frturret: 20, gturret: 18,
+  turret: 14, tesla: 10,
+  rturret: 5, mortar: 3,
+};
+export const DEPLOY_IDS = Object.keys(DEPLOY_WEIGHT);
+const DEPLOY_TOTAL = DEPLOY_IDS.reduce((a, id) => a + DEPLOY_WEIGHT[id], 0);
+export function rollDeploy(rng = Math.random) {
+  let r = rng() * DEPLOY_TOTAL;
+  for (const id of DEPLOY_IDS) if ((r -= DEPLOY_WEIGHT[id]) <= 0) return id;
+  return DEPLOY_IDS[0];
+}
+// rolls > 1: pick the best (priciest) of several rolls — used to skew better loot sources toward the rarer turrets
+const deployItem = (rng, rolls = 1) => {
+  let id = rollDeploy(rng);
+  for (let i = 1; i < rolls; i++) { const c = rollDeploy(rng); if (ITEMS[c].price > ITEMS[id].price) id = c; }
+  return { kind: 'item', id, n: 1 };
+};
+
 // kind: 'chest' | 'drop' (supply balloon) | 'boss'. Returns pickups to scatter.
 export function rollLoot(kind, rng = Math.random) {
   const out = [];
@@ -195,21 +234,21 @@ export function rollLoot(kind, rng = Math.random) {
     out.push(lootGun(rng, w, [30, 30, 25, 12, 3], 0.1), ammoFor(w));
     if (rng() < 0.5) out.push(anyItem(rng));
     if (rng() < 0.15) out.push(lootArmor(rng));
-    out.push(mats(rng, 45));
+    out.push(mats(rng, 45), deployItem(rng)); // mostly a cheap trap, rarely a good turret
   } else if (kind === 'drop') {
     const w = rng() < 0.25 ? pick(rng, ['rocket', 'minigun', 'gl', 'kinetic']) : pick(rng, LOOT_GUNS);
-    out.push(lootGun(rng, w, [0, 10, 40, 35, 15], 0.4, 0.3), ammoFor(w, 2), anyItem(rng), anyItem(rng), mats(rng, 150));
+    out.push(lootGun(rng, w, [0, 10, 40, 35, 15], 0.4, 0.3), ammoFor(w, 2), anyItem(rng), anyItem(rng), mats(rng, 150), deployItem(rng, 2));
     if (rng() < 0.3) out.push(lootArmor(rng, 0.3));
     if (rng() < 0.25) out.push(lootAttach(rng));
   } else {
     for (let i = 0; i < 2; i++) { const w = pick(rng, [...LOOT_GUNS, 'rocket', 'minigun', 'gl', 'kinetic']); out.push({ ...lootGun(rng, w, [0, 0, 0, 1, 1], 0.6, 1, 0.35) }, ammoFor(w, 2)); }
-    out.push(lootArmor(rng, 1, 0.35), lootAttach(rng));
+    out.push(lootArmor(rng, 1, 0.35), lootAttach(rng), deployItem(rng, 4)); // best odds in the game at a good turret
     out.push(anyItem(rng), anyItem(rng), anyItem(rng), { kind: 'mats', mat: 'wood', n: 225 }, { kind: 'mats', mat: 'stone', n: 225 }, { kind: 'mats', mat: 'metal', n: 225 }, { kind: 'svsupply' });
   }
   return out.filter(Boolean);
 }
 
-// ---------- the Blacksmith (after the first Brood Titan) ----------
+// ---------- the Blacksmith (unlocks once wave 7 is cleared) ----------
 // turret upgrades stack without limit (price × 1.5 ** level, tracked per level in d.mods); "Refill ammo"
 // stays a one-off (no level, just tops the magazine back up to DEFENSES[...].ammo).
 export const SMITH = {
@@ -228,26 +267,65 @@ export const SMITH = {
 
 // ---------- player classes (picked in the lobby or at the Core during a break) ----------
 export const CLASSES = {
-  tank: { name: 'Tank', hp: 300, speed: 0.88, desc: '300 health · a bit slower' },
-  assault: { name: 'Assault', hp: 200, speed: 1.1, dmg: 1.2, mag: 1.5, ammo: 1.5, desc: '+20% damage · 50% bigger magazines · carries 50% more ammo · faster' },
-  medic: { name: 'Medic', hp: 200, speed: 1, regen: 6, aura: 8, auraR: 5, revive: 0.5, desc: 'Heals over time and heals people near you · revives twice as fast · free bandages and a medkit every wave' },
+  tank: {
+    name: 'Tank', hp: 300, speed: 0.88, dr: 0.15, buildMul: 1.25,
+    desc: '300 health · a bit slower · takes 15% less damage · immune to knockback and stuns from zombies · builds and repairs 25% faster',
+  },
+  assault: {
+    name: 'Assault', hp: 200, speed: 1.1, dmg: 1.2, mag: 1.5, ammo: 1.5, killRate: 0.15, killRateMs: 3000,
+    desc: '+20% damage · 50% bigger magazines · carries 50% more ammo · faster · +15% fire rate for 3s after a kill',
+  },
+  medic: {
+    name: 'Medic', hp: 200, speed: 1, regen: 6, aura: 8, auraR: 5, revive: 0.5, healMul: 1.25, coreShieldRegen: 2,
+    desc: 'Heals over time and heals people near you · revives twice as fast · healing items are 25% stronger · a free medkit every 2 waves · regenerates shield near the Core',
+  },
 };
 // how much of an ammo type you can carry (Assault carries more)
 export const ammoCap = (type, cls) => Math.round((AMMO[type]?.cap ?? 0) * (CLASSES[cls]?.ammo ?? 1));
 export const CLASS_IDS = Object.keys(CLASSES);
 
+// ---------- survivor classes (rolled when a wounded survivor is rescued) ----------
+// hpMult/dmgMult scale the tier's base numbers; guns[tier] curates which gun that class carries at each
+// tier (tier itself still governs raw quality — see SURVIVOR.tiers). postBias steers pickPost(): positive
+// holds nearer the outer edge of the ring ("the front"), negative nearer the Core ("the back").
+export const SURVIVOR_CLASSES = {
+  guardian: {
+    name: 'Guardian', hpMult: 1.35, dmgMult: 0.85, postBias: 1, aggroMult: 0.7, color: 0x4d5866,
+    desc: 'Most health · riot shield and a shotgun · holds the front of the ring and draws zombies',
+    guns: ['pistol', 'pump', 'pump', 'tac_shotgun'],
+  },
+  medic: {
+    name: 'Medic', hpMult: 0.75, dmgMult: 0.65, postBias: 0, heal: 3, healR: 4, color: 0xdce8dc,
+    desc: 'Least damage · slowly heals nearby players and survivors',
+    guns: ['pistol', 'pistol', 'smg', 'smg'],
+  },
+  ranger: {
+    name: 'Ranger', hpMult: 1, dmgMult: 1.3, postBias: -1, color: 0x5c6b47,
+    desc: 'Best damage · rifle or DMR · stays at the back of the ring',
+    guns: ['pistol', 'ar', 'ar', 'h_ssg'],
+  },
+};
+export const SURVIVOR_CLASS_IDS = Object.keys(SURVIVOR_CLASSES);
+
 // ---------- survivors ----------
-// Survivors come in tiers, each with its own gun. They never heal on their own (medics, campfires and your
-// bandages / medkits can patch them up) and a dead survivor is gone for good.
+// Survivors come in tiers (raw gun quality: hp/dmg/rpm/hit/range/mag/ammo) crossed with a class (which
+// actual gun they carry — see SURVIVOR_CLASSES[cls].guns — and their look). They never heal on their own
+// (medics, campfires and your bandages / medkits can patch them up) and a dead survivor is gone for good.
 export const SURVIVOR = {
-  speed: 3.4, reload: 2.2,
+  speed: 3.4, reload: 2.2, retreat: 6, leash: 14, // retreat: back off when a zombie is this close; leash: max stray from the Core
   tiers: [
-    { name: 'Recruit', gun: 'Pistol', w: 'pistol', snd: 'glock', hp: 400, dmg: 16, rpm: 300, hit: 0.6, range: 18, mag: 12, ammo: 240, color: 0xe8892f },
-    { name: 'Guard', gun: 'SMG', w: 'smg', snd: 'mac10', hp: 500, dmg: 12, rpm: 600, hit: 0.55, range: 20, mag: 30, ammo: 420, color: 0x3fa7c9 },
-    { name: 'Soldier', gun: 'Assault Rifle', w: 'ar', snd: 'm4a4', hp: 600, dmg: 26, rpm: 420, hit: 0.62, range: 26, mag: 30, ammo: 360, color: 0x7da23e },
-    { name: 'Marksman', gun: 'DMR', w: 'h_ssg', snd: 'ssg08', hp: 550, dmg: 72, rpm: 110, hit: 0.8, range: 38, mag: 10, ammo: 120, color: 0x9b6bd6 },
+    { name: 'Recruit', gun: 'Pistol', hp: 400, dmg: 16, rpm: 300, hit: 0.6, range: 18, mag: 12, ammo: 240 },
+    { name: 'Guard', gun: 'SMG', hp: 500, dmg: 12, rpm: 600, hit: 0.55, range: 20, mag: 30, ammo: 420 },
+    { name: 'Soldier', gun: 'Assault Rifle', hp: 600, dmg: 26, rpm: 420, hit: 0.62, range: 26, mag: 30, ammo: 360 },
+    { name: 'Marksman', gun: 'DMR', hp: 550, dmg: 72, rpm: 110, hit: 0.8, range: 38, mag: 10, ammo: 120 },
   ],
 };
+// combined stats for a survivor's actual weapon: tier sets the numbers, class picks the gun (dmg scaled by class)
+export function survivorGun(tier, cls) {
+  const T = SURVIVOR.tiers[tier] ?? SURVIVOR.tiers[0], C = SURVIVOR_CLASSES[cls] ?? SURVIVOR_CLASSES.ranger;
+  const w = C.guns[Math.min(tier, C.guns.length - 1)];
+  return { ...T, w, dmg: Math.round(T.dmg * C.dmgMult), snd: WEAPONS[w]?.snd ?? 'glock' };
+}
 // wounded survivors wait in the shelters on waves 3, 7, 11, 15, …
 export const rescueWave = w => w >= 3 && (w - 3) % 4 === 0;
 export const RESCUE_WAVES = [3, 7, 11, 15, 19, 23, 27, 31];

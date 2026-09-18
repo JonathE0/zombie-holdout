@@ -14,6 +14,16 @@ const face = (z, x, zz, dt, rate = 6) => {
   z.yaw = wrap(z.yaw + Math.max(-rate * dt, Math.min(rate * dt, wrap(want - z.yaw))));
 };
 
+// Sniper shots lock a straight line (eye -> aim point) the moment the telegraph starts. On fire, only a
+// target still within `tol` of that exact line counts as hit — stepping out of the shown laser dodges it.
+export const BEAM_TOL = 0.6;
+export function onBeam(e, a, p, tol = BEAM_TOL) {
+  const dx = a[0] - e[0], dy = a[1] - e[1], dz = a[2] - e[2], l = Math.hypot(dx, dy, dz) || 1;
+  const ux = dx / l, uy = dy / l, uz = dz / l;
+  const t = Math.max(0, (p[0] - e[0]) * ux + (p[1] - e[1]) * uy + (p[2] - e[2]) * uz);
+  return Math.hypot(p[0] - (e[0] + ux * t), p[1] - (e[1] + uy * t), p[2] - (e[2] + uz * t)) <= tol;
+}
+
 // ---------- sniper: holds its gate, aims (a visible laser), fires ----------
 function sniperTargets(room, z, eye) {
   const out = [];
@@ -39,18 +49,21 @@ export function stepSniper(room, z, dt, now) {
     if (c) face(z, c.at[0], c.at[2], dt, 3);
     if (now >= z.stateEnd) {
       z.state = S.STRIKE; z.stateEnd = now + 300; z.nextAtk = now + t.cooldown * 1000;
-      const alive = c && (c.kind === 'd' ? room.defenses.list.get(c.ref.id) === c.ref : c.ref.alive && !c.ref.downed);
-      if (alive) {
-        const at = c.kind === 'd' ? [c.ref.pos[0], c.ref.pos[1] + 1, c.ref.pos[2]] : [c.ref.st.p[0], c.ref.st.p[1] + 1.3, c.ref.st.p[2]];
-        const clear = room.lineOfSight(eye, at);
-        room.broadcast({ t: 'zshot', id: z.id, a: eye.map(r2), b: at.map(r2), hit: clear });
-        if (clear) {
-          if (c.kind === 'p') room.hurtPlayer(c.ref, t.dmg * mul, z);
-          else if (c.kind === 'sv') room.survivors.hurt(c.ref, t.npcDmg * mul);
-          else room.defenses.damage(c.ref, t.npcDmg * mul);
+      if (c) {
+        const from = z.lockEye ?? eye, at = c.at; // the exact line the telegraph showed, not a re-aim
+        const validEntity = c.kind === 'd' ? room.defenses.list.get(c.ref.id) === c.ref : (c.ref.alive && !c.ref.downed);
+        const clear = room.lineOfSight(from, at);
+        room.broadcast({ t: 'zshot', id: z.id, a: from.map(r2), b: at.map(r2), hit: clear });
+        if (clear && validEntity) {
+          const cur = c.kind === 'd' ? [c.ref.pos[0], c.ref.pos[1] + 1, c.ref.pos[2]] : c.kind === 'sv' ? [c.ref.pos[0], c.ref.pos[1] + 1.3, c.ref.pos[2]] : [c.ref.st.p[0], c.ref.st.p[1] + 1.3, c.ref.st.p[2]];
+          if (onBeam(from, at, cur)) { // still standing where the laser was aimed — didn't dodge
+            if (c.kind === 'p') room.hurtPlayer(c.ref, t.dmg * mul, z);
+            else if (c.kind === 'sv') room.survivors.hurt(c.ref, t.npcDmg * mul);
+            else room.defenses.damage(c.ref, t.npcDmg * mul);
+          }
         }
       }
-      z.target = null;
+      z.target = null; z.lockEye = null;
     }
     return;
   }
@@ -67,8 +80,8 @@ export function stepSniper(room, z, dt, now) {
   const c = z.aimAt;
   if (c) face(z, c.at[0], c.at[2], dt, 3);
   if (c && z.state === S.MOVE && now >= z.nextAtk) {
-    z.state = S.AIM; z.stateEnd = now + t.windup * 1000; z.target = c;
-    room.broadcast({ t: 'zaim', id: z.id, p: c.at.map(r2), ms: t.windup * 1000 });
+    z.state = S.AIM; z.stateEnd = now + t.windup * 1000; z.target = c; z.lockEye = eye;
+    room.broadcast({ t: 'zaim', id: z.id, a: eye.map(r2), p: c.at.map(r2), ms: t.windup * 1000 });
   }
 }
 

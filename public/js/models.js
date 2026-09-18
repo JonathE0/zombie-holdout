@@ -12,7 +12,10 @@ const ITEM_LOOK = {
   throw: [[0.07, 0.07, 0.07], 0x4d6b35], heal: [[0.1, 0.07, 0.12], 0xd94040], shield: [[0.06, 0.1, 0.06], 0x3f8cff],
   trap: [[0.14, 0.04, 0.14], 0x6b7280], deploy: [[0.12, 0.1, 0.12], 0x3a3f46], armor: [[0.14, 0.12, 0.06], 0x55606b], attach: [[0.05, 0.05, 0.1], 0x2b2f35],
 };
-const ITEM_COLOR = { molotov: 0xc9772e, freeze: 0x9ff2ff, bandage: 0xe9e2d0, campfire: 0xff8a3c, flame: 0xe0632d, rturret: 0x4b5a3e, shield_s: 0x7fb8ff };
+const ITEM_COLOR = {
+  molotov: 0xc9772e, freeze: 0x9ff2ff, bandage: 0xe9e2d0, campfire: 0xff8a3c, flame: 0xe0632d, rturret: 0x4b5a3e, shield_s: 0x7fb8ff,
+  gturret: 0x767b80, frturret: 0x8fd6e8, flturret: 0x8a2f1c, tesla: 0x9d8bf0, mortar: 0x3c4034,
+};
 
 const BOX = new THREE.BoxGeometry(1, 1, 1);
 const CYL = new THREE.CylinderGeometry(1, 1, 1, 12).rotateX(Math.PI / 2);
@@ -98,7 +101,7 @@ export class PlayerModel {
     this.gunPivot.rotation.x = pitch * 0.8;
     if (weapon !== this.weapon) {
       this.weapon = weapon;
-      this.gun.material = weapon === 'knife' ? mat(0x2b5ce0) : skinMat3P(weapon); // skins on the opponent's gun too
+      this.gun.material = weapon === 'knife' ? mat(0x2b5ce0) : skinMat3P(weapon); // skins on teammates' guns too
       const len = GUN_LEN[WEAPONS[weapon]?.cat] ?? 0.5;
       this.gun.scale.set(0.05, 0.08, len);
       this.gun.position.set(0, 0, -len / 2 - 0.05);

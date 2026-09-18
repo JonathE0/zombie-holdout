@@ -3,7 +3,7 @@
 //    cleared: a giant that stomps builds flat, carrying riders that throw acid and can't be hurt until they
 //    leap off (two immediately, then every ~12 s) or the Titan dies. It also drops fresh runners/stalkers off
 //    its back every 8 s, and carries two permanent Sniper Riders that never dismount on their own and snipe
-//    like a ground Sniper. Killing the Titan unlocks the Blacksmith.
+//    like a ground Sniper.
 //  - wave 15 (30, 45…): the Maw. A colossal worm that hunts underground and erupts under builds and players.
 //    Seismic thumpers in the houses lure it up with its mouth open (its gullet takes triple damage); below
 //    60 % it spews stalkers, below 25 % it tries to devour the Core unless the team interrupts it.
@@ -12,7 +12,7 @@ import { THUMPER_SPOTS } from '../../shared/outpost.js';
 import { rollLoot, MONEY_CAP } from '../../shared/holdout.js';
 import { raySphere } from '../../shared/skyboss.js';
 import { distToBox } from '../../shared/build.js';
-import { addHazard } from './behaviors.js';
+import { addHazard, onBeam } from './behaviors.js';
 
 const r2 = v => Math.round(v * 100) / 100;
 export const MAW = {
@@ -31,7 +31,7 @@ export class Bosses {
     this.titan = null;        // { phase: 'waiting' | 'coming' | 'fighting', z, at }
     this.maw = null;
     this.thumpers = [];
-    this.smith = false;       // the Blacksmith unlocks when the first Titan falls
+    this.smith = false;       // the Blacksmith unlocks once wave 7 is cleared (see room.js waveCleared)
   }
 
   // wave director asks: may the wave end?
@@ -87,12 +87,10 @@ export class Bosses {
       const z = T.z;
       if (z.dead) {
         T.phase = 'dead';
-        this.smith = true;
         for (const r of z.riders) if (!r.dead && r.mount) this.dismount(r, now, true);
         room.inventory.scatter([{ kind: 'gun', w: 'broodlauncher', r: 4, tier: 3, el: null }], [z.pos[0], z.pos[1], z.pos[2]], 2.4, true);
         room.broadcast({ t: 'msg', text: 'The Brood Titan dropped the Brood Launcher!' });
         room.broadcast({ t: 'boss', ev: 'titandie', by: z.lastHitBy ?? null });
-        room.onSmithUnlocked?.();
         return;
       }
       if (now >= T.nextDrop) { // one or two (non-permanent) riders leap down to fight
@@ -164,11 +162,15 @@ export class Bosses {
       z.target = null;
       const alive = c && (c.kind === 'sv' || (c.ref.alive && !c.ref.downed));
       if (c && alive) {
-        const at = c.kind === 'sv' ? [c.ref.pos[0], c.ref.pos[1] + 1.3, c.ref.pos[2]] : [c.ref.st.p[0], c.ref.st.p[1] + 1.3, c.ref.st.p[2]];
-        const clear = room.lineOfSight(eye, at);
-        room.broadcast({ t: 'zshot', id: z.id, a: eye.map(r2), b: at.map(r2), hit: clear });
-        if (clear) { if (c.kind === 'sv') room.survivors.hurt(c.ref, t.npcDmg); else room.hurtPlayer(c.ref, t.dmg, z); }
+        const from = z.lockEye ?? eye, at = c.at; // the exact line the telegraph showed, not a re-aim
+        const clear = room.lineOfSight(from, at);
+        room.broadcast({ t: 'zshot', id: z.id, a: from.map(r2), b: at.map(r2), hit: clear });
+        if (clear) {
+          const cur = c.kind === 'sv' ? [c.ref.pos[0], c.ref.pos[1] + 1.3, c.ref.pos[2]] : [c.ref.st.p[0], c.ref.st.p[1] + 1.3, c.ref.st.p[2]];
+          if (onBeam(from, at, cur)) { if (c.kind === 'sv') room.survivors.hurt(c.ref, t.npcDmg); else room.hurtPlayer(c.ref, t.dmg, z); }
+        }
       }
+      z.lockEye = null;
       return;
     }
     if (now < z.nextAtk) return;
@@ -182,7 +184,8 @@ export class Bosses {
     z.state = 1;
     z.stateEnd = now + t.windup * 1000;
     z.target = best;
-    room.broadcast({ t: 'zaim', id: z.id, p: best.at.map(r2), ms: t.windup * 1000 });
+    z.lockEye = eye;
+    room.broadcast({ t: 'zaim', id: z.id, a: eye.map(r2), p: best.at.map(r2), ms: t.windup * 1000 });
   }
 
   // riders can't be hurt while mounted

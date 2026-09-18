@@ -5,7 +5,7 @@ import { HoldoutRoom, HOLDOUT } from '../server/holdout/room.js';
 import { GRID } from '../shared/build.js';
 import { BoxGrid } from '../shared/boxgrid.js';
 import { WEAPONS } from '../shared/weapons.js';
-import { ITEMS, SURVIVOR, SMITH, DEFENSES, rescueWave, elementPrice } from '../shared/holdout.js';
+import { ITEMS, SURVIVOR, SURVIVOR_CLASSES, SMITH, DEFENSES, TURRET_TYPES, DEPLOY_WEIGHT, DEPLOY_IDS, rollDeploy, rollLoot, rescueWave, elementPrice } from '../shared/holdout.js';
 import { OUTPOST_PROPS, OUTPOST_SHELTERS, PROP_TYPES, NODE_TYPES } from '../shared/outpost.js';
 
 let T = 9_000_000;
@@ -21,6 +21,8 @@ function join(room, name = 'P') {
   return { player, messages, last: t => messages.filter(m => m.t === t).at(-1), all: t => messages.filter(m => m.t === t) };
 }
 const started = room => { room.phase = 'prep'; return room; };
+// small seeded RNG so loot-weighting tests are deterministic (rollLoot/rollDeploy/rollRarity take an rng(), default Math.random)
+const mulberry32 = seed => () => { seed |= 0; seed = (seed + 0x6d2b79f5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
 
 test('builds that lose their connection to the ground collapse', () => {
   const room = started(new HoldoutRoom('I', {}));
@@ -99,8 +101,13 @@ test('survivors: tiers carry different guns, heal passively but very slowly, ban
   const a = join(room, 'A'), p = a.player;
   assert.ok(rescueWave(3) && rescueWave(7) && rescueWave(11) && !rescueWave(5));
   assert.equal(SURVIVOR.tiers.map(t => t.gun).join(','), 'Pistol,SMG,Assault Rifle,DMR');
-  const sv = room.survivors.spawnWounded(OUTPOST_SHELTERS[0], 2);
-  assert.equal(sv.maxHp, SURVIVOR.tiers[2].hp);
+  const sv = room.survivors.spawnWounded(OUTPOST_SHELTERS[0], 2, 'ranger');
+  assert.equal(sv.maxHp, SURVIVOR.tiers[2].hp, 'Ranger has no hp multiplier');
+  assert.equal(sv.gun.w, 'ar', 'tier 2 Ranger carries the AR curated for that class');
+  assert.equal(sv.gun.dmg, Math.round(SURVIVOR.tiers[2].dmg * SURVIVOR_CLASSES.ranger.dmgMult));
+  const tank = room.survivors.spawnWounded(OUTPOST_SHELTERS[1], 1, 'guardian');
+  assert.equal(tank.gun.w, 'pump', 'Guardians fight up close with a shotgun');
+  assert.equal(tank.maxHp, Math.round(SURVIVOR.tiers[1].hp * SURVIVOR_CLASSES.guardian.hpMult), 'Guardians have the most health');
   sv.state = 'active';
   sv.hp = 100;
   room.phase = 'intermission';
@@ -121,6 +128,87 @@ test('turrets cost 1.5x; traps and deployables are separate kinds', () => {
   assert.equal(ITEMS.turret.kind, 'deploy');
   assert.equal(ITEMS.spikes.kind, 'trap');
   assert.equal(HOLDOUT.countdown, 5000);
+});
+
+test('new turret types: gatling, frost, flame, tesla and mortar each fire and apply their own effect', () => {
+  const room = started(new HoldoutRoom('T2', {}));
+  const a = join(room, 'A'), p = a.player;
+  room.startWave(1); room.director.queue = [];
+  const zAt = (x, z) => { const zb = room.spawnZombie('shambler', 'N', ''); zb.pos = [x, 0, z]; zb.hp = zb.maxHp = 100000; zb.hist = []; return zb; };
+  const place = (type, x, z) => {
+    const d = { id: room.defenses.nextId++, type, pos: [x, 0, z], pid: 0, side: 2, owner: p.id, uses: 0, ammo: DEFENSES[type].ammo ?? 0, hp: DEFENSES[type].hp ?? 0, next: 0, until: 0 };
+    room.defenses.list.set(d.id, d);
+    return d;
+  };
+  for (const t of ['gturret', 'frturret', 'flturret', 'tesla', 'mortar']) assert.ok(TURRET_TYPES.includes(t), `${t} is a turret type`);
+
+  // Gatling: high fire rate, low damage per shot, chews ammo
+  const zg = zAt(20, -5), dg = place('gturret', 20, 0);
+  const hp0 = zg.hp, ammo0 = dg.ammo;
+  room.defenses.update(0.05, T += 50);
+  assert.ok(zg.hp < hp0, 'gatling turret damaged its target');
+  assert.ok(dg.ammo < ammo0, 'gatling turret spent ammo');
+
+  // Frost: low damage, chills and slows what it hits
+  const zf = zAt(100, -5); place('frturret', 100, 0);
+  room.defenses.update(0.05, T += 50);
+  assert.ok(zf.hp < 100000, 'frost turret damaged its target');
+  assert.ok(zf.slow > 0 && zf.slowUntil > T, 'frost turret slows what it hits');
+
+  // Flame: short-range cone, sets zombies burning (catches a second zombie standing in the same cone)
+  const zm1 = zAt(200, -4), zm2 = zAt(201, -4.2); place('flturret', 200, 0);
+  room.defenses.update(0.05, T += 50);
+  assert.ok(zm1.burnUntil > T, 'flame turret ignites its target');
+  assert.ok(zm2.burnUntil > T, 'flame turret cone also caught a zombie standing beside it');
+
+  // Tesla: low rate, arcs to a couple of nearby zombies
+  const zt1 = zAt(300, -5), zt2 = zAt(301.5, -5.5); place('tesla', 300, 0);
+  const t1hp0 = zt1.hp, t2hp0 = zt2.hp;
+  room.defenses.update(0.05, T += 50);
+  assert.ok(zt1.hp < t1hp0, 'tesla coil hit its target');
+  assert.ok(zt2.hp < t2hp0, 'tesla coil arced to a second nearby zombie');
+
+  // Mortar: long range, splash, can't hit anything close (kept off the straight shot to the far target,
+  // otherwise the shell would clip it in passing — it's the targeting/minimum-range rule under test here)
+  const zNear = zAt(406, -1), zFar = zAt(400, -20), zSplash = zAt(401, -20.5); place('mortar', 400, 0);
+  room.defenses.update(0.05, T += 50);
+  for (let i = 0; i < 300; i++) room.combat.update(0.01, T += 10); // fine steps so the fast-moving shell can't skip past its target
+  assert.equal(zNear.hp, zNear.maxHp, "mortar can't hit anything within its minimum range");
+  assert.ok(zFar.hp < zFar.maxHp, 'mortar hit the farther target');
+  assert.ok(zSplash.hp < zSplash.maxHp, 'mortar splash caught a zombie standing next to it');
+});
+
+test('deployable loot: one weighting table drives chests, drops, bosses and elite zombie kills', () => {
+  // the table shape: every id is a real trap/turret item, every weight is a positive number, and it spans
+  // from the cheapest traps to the priciest turrets
+  assert.ok(DEPLOY_IDS.length >= 8);
+  for (const id of DEPLOY_IDS) {
+    assert.ok(ITEMS[id], `${id} is a real item`);
+    assert.ok(['trap', 'deploy'].includes(ITEMS[id].kind), `${id} is a trap or deployable`);
+    assert.ok(DEPLOY_WEIGHT[id] > 0, `${id} has a positive weight`);
+  }
+  assert.ok(DEPLOY_WEIGHT.spikes > DEPLOY_WEIGHT.turret, 'a cheap trap is far more common than a turret');
+  assert.ok(DEPLOY_WEIGHT.turret > DEPLOY_WEIGHT.mortar, 'the base turret is more common than the priciest turret');
+  assert.ok(DEPLOY_WEIGHT.turret > DEPLOY_WEIGHT.rturret, 'balanced against the rocket turret, per the spec');
+
+  // rollDeploy always returns something rollable, and skews toward the table's weighting
+  const rng = mulberry32(12345);
+  const counts = {};
+  for (let i = 0; i < 4000; i++) { const id = rollDeploy(rng); counts[id] = (counts[id] || 0) + 1; }
+  assert.ok(counts.spikes > counts.mortar * 10, 'spikes come up far more often than mortars over many rolls');
+
+  // chests mostly give a trap, rarely a good turret; bosses have the best odds of all at a good turret
+  const avgDeployPrice = (kind, n, rngSeed) => {
+    const r = mulberry32(rngSeed);
+    let total = 0;
+    for (let i = 0; i < n; i++) {
+      const it = rollLoot(kind, r).find(x => x.kind === 'item' && DEPLOY_WEIGHT[x.id]);
+      total += ITEMS[it.id].price;
+    }
+    return total / n;
+  };
+  const chestAvg = avgDeployPrice('chest', 800, 1), bossAvg = avgDeployPrice('boss', 800, 2);
+  assert.ok(bossAvg > chestAvg, `bosses should roll pricier deployables on average than chests (boss ${bossAvg} vs chest ${chestAvg})`);
 });
 
 test('inventory: 6 + 18 slots, stacking, drag between slots, armor slots, dropping, attachments', () => {
@@ -286,7 +374,7 @@ test('specialists: snipers camp and hit survivors harder, hexers blind, bloaters
   advance(room, 7000);
   assert.ok(Math.hypot(sn.pos[0] - spawnAt[0], sn.pos[2] - spawnAt[2]) < 3, 'the sniper stays at its gate');
   assert.ok(a.all('zaim').length >= 1, 'it telegraphs its shots');
-  assert.ok(hp0 - sv.hp >= 80, `survivor took ${hp0 - sv.hp}`);
+  assert.ok(hp0 - sv.hp >= 40, `survivor took ${hp0 - sv.hp}`); // npcDmg 45 * ~1.35 wave mul, one shot in the 2.2s-windup window
   room.removeZombie(sn);
   room.survivors.perish(sv);
   p.st.p = [0, 0, -10];
@@ -362,7 +450,7 @@ test('Brood Titan: two riders leap immediately, drops minions every 8s, permanen
   assert.ok(riders.every(r => r.dead || !r.mount), 'the rest fall off when it dies');
   assert.ok(snipers.every(r => !r.mount), 'the Sniper Riders fall off too, and are now killable');
   assert.equal(room.bosses.immune(snipers[0]), false, 'no longer immune once dismounted');
-  assert.equal(room.bosses.smith, true, 'the Blacksmith unlocks');
+  assert.equal(room.bosses.smith, false, 'the Titan no longer gates the Blacksmith (it unlocks at wave 7 instead)');
   assert.equal(room.phase, 'wave', 'riders still have to be killed');
   for (const z of [...room.zombies.values()]) room.killZombie(z, p, 'ar'); // riders, snipers, and any dropped minions
   advance(room, 100);
@@ -415,7 +503,7 @@ test('Blacksmith: forges tier III, infuses, fits attachments and upgrades turret
   p.mats.metal = 200;
   p.st.p = [SMITH.x + 1, 0, SMITH.z];
   room.handle(p, { t: 'smith', op: 'forge', uid: gun.uid });
-  assert.equal(gun.tier, 2, 'no Blacksmith before the first Titan falls');
+  assert.equal(gun.tier, 2, 'no Blacksmith before wave 7 is cleared');
   room.bosses.smith = true;
   room.handle(p, { t: 'smith', op: 'forge', uid: gun.uid });
   assert.equal(gun.tier, 3);

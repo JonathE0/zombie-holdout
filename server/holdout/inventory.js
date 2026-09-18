@@ -2,7 +2,7 @@
 // typed ammo and building materials as plain counters, the shop at the Core, the team chest (a shared
 // 18-slot grid plus pooled money / materials / ammo), ground pickups and loot spilling. Server-authoritative.
 import { WEAPONS } from '../../shared/weapons.js';
-import { AMMO, AMMO_IDS, ITEMS, POWERUPS, MAT_CAP, MONEY_CAP, SHOP_RARITY, START_AMMO, shopEntry, ammoCap, elementPrice, RARITY, rarityCost, sellPrice, TEAM_UPS } from '../../shared/holdout.js';
+import { AMMO, AMMO_IDS, ITEMS, POWERUPS, MAT_CAP, MONEY_CAP, SHOP_RARITY, START_AMMO, shopEntry, ammoCap, elementPrice, RARITY, rarityCost, sellPrice, itemValue, TEAM_UPS } from '../../shared/holdout.js';
 import { ELEMENTS } from '../../shared/elements.js';
 import { INV_SIZE, HOTBAR, STASH_SIZE, SACK_SIZE, ARMOR, ARMOR_SLOTS, ATTACH, stackMax, magFor, kindOf, placeItem, countIn, tierCost, itemName, isConsumable } from '../../shared/items.js';
 import { MAT_IDS } from '../../shared/build.js';
@@ -226,6 +226,9 @@ export class Inventory {
     if ((a.box === 's' || b.box === 's') && !this.nearStash(p)) return room.send(p, { t: 'deny', text: 'Stand next to the team chest' });
     const src = this.get(p, a), dst = this.get(p, b);
     if (!src) return;
+    // Colossus-wave chest snipers: one per player per wave (see giveChestSnipers) — normal chest rules otherwise
+    const takingChestSniper = a.box === 's' && b.box !== 's' && src.kind === 'gun' && src.chestGift;
+    if (takingChestSniper && room.chestSniperTaken?.has(p.id)) return room.send(p, { t: 'deny', text: 'You already grabbed a sniper from the chest this wave' });
     if (b.box === 'k' && !isConsumable(src)) return room.send(p, { t: 'deny', text: 'The sack only holds heals, shields and adrenaline' });
     // an attachment dropped on a gun gets fitted (whatever was in that slot comes back)
     if (src.kind === 'attach' && dst?.kind === 'gun' && b.box !== 'a') {
@@ -246,6 +249,7 @@ export class Inventory {
       dst.n += k; src.n -= k;
       if (src.n <= 0) this.set(p, a, null);
     } else { this.set(p, a, dst ?? null); this.set(p, b, src); }
+    if (takingChestSniper) (room.chestSniperTaken ??= new Set()).add(p.id);
     this.changed(p, a, b);
   }
 
@@ -446,6 +450,26 @@ export class Inventory {
   }
 
   broadcastStash() { this.room.broadcast({ t: 'stash', s: this.stash }); }
+
+  // Colossus wave incoming: one SSG per player into the team chest (each may take only one — see onMove).
+  // If the chest is full, clears its two cheapest items to make room.
+  giveChestSnipers(n) {
+    const room = this.room, items = this.stash.items;
+    let cleared = false;
+    if (items.every(Boolean)) {
+      for (const i of items.map((it, idx) => idx).sort((i, j) => itemValue(items[i]) - itemValue(items[j])).slice(0, 2)) items[i] = null;
+      cleared = true;
+    }
+    for (let i = 0; i < n; i++) {
+      const gun = makeGun('h_ssg', SHOP_RARITY);
+      gun.chestGift = true;
+      const left = placeItem(items, gun);
+      if (left) this.spawn(left, [room.map.stash.x, 0.2, room.map.stash.z]);
+    }
+    room.chestSniperTaken = new Set();
+    this.broadcastStash();
+    room.broadcast({ t: 'msg', text: `The squad's sniper rifles are in the team chest — one each!${cleared ? ' (cleared 2 chest items to make room)' : ''}` });
+  }
 
   syncTo(p) {
     this.room.send(p, { t: 'pkall', l: [...this.pickups.values()].map(pk => this.tuple(pk)) });

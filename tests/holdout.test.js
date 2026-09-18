@@ -45,7 +45,6 @@ test('rooms hold four; everyone ready starts the countdown, then wave 1 spawns f
   const room = new HoldoutRoom('ZOMB', { rng });
   const a = join(room, 'A');
   assert.equal(a.messages[0].t, 'welcome');
-  assert.equal(a.messages[0].gameMode, 'zombies');
   const others = [join(room, 'B'), join(room, 'C'), join(room, 'D')];
   assert.ok(room.isFull());
   assert.equal(room.core.max, coreHp(4));

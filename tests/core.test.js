@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { HoldoutRoom } from '../server/holdout/room.js';
-import { CORE_UPS } from '../shared/holdout.js';
+import { CORE_UPS, SURVIVOR_CLASS_IDS } from '../shared/holdout.js';
 
 let T = 8_000_000;
 const realNow = Date.now;
@@ -34,7 +34,7 @@ test('the Core regenerates a little on its own, all the time, never past max', (
   assert.equal(room.core.hp, max, 'never over max');
 });
 
-test('survivors: passive regen, assignment follows the last assigner, orders move only that owner\'s survivors', () => {
+test('survivors: passive regen, rolled a class, retreat from a close threat, drift back inside the leash', () => {
   const room = started(new HoldoutRoom('CS', {}));
   const a = join(room, 'A'), p = a.player;
   const b = join(room, 'B'), q = b.player;
@@ -48,6 +48,8 @@ test('survivors: passive regen, assignment follows the last assigner, orders mov
   advance(room, 200);
   assert.equal(sv1.state, 'active');
   assert.equal(sv2.state, 'active');
+  assert.ok(SURVIVOR_CLASS_IDS.includes(sv1.cls), 'rolled one of the survivor classes');
+  sv1.cls = sv2.cls = 'ranger'; // pin away from Medic: its passive aura would otherwise heal sv1 too and flake this assertion
 
   // passive healing, very slow
   room.survivors.hurt(sv1, 60);
@@ -56,27 +58,23 @@ test('survivors: passive regen, assignment follows the last assigner, orders mov
   assert.ok(sv1.hp > hurtHp, 'healed a little on its own');
   assert.ok(sv1.hp < hurtHp + 20, 'still very slow');
 
-  // assignment: aiming (within range) at an active survivor assigns it; last assigner wins
-  p.st.p = [sv1.pos[0], 0, sv1.pos[2]];
-  room.handle(p, { t: 'svassign', id: sv1.id });
-  assert.equal(sv1.owner, p.id);
-  q.st.p = [sv1.pos[0], 0, sv1.pos[2]];
-  room.handle(q, { t: 'svassign', id: sv1.id });
-  assert.equal(sv1.owner, q.id, 'last assigner wins');
-  room.handle(q, { t: 'svassign', id: sv1.id }); // pressing again on one of yours unassigns
-  assert.equal(sv1.owner, null);
+  // a zombie right on top of it: backs away instead of standing and fighting or running past its target
+  const z = zombieAt(room, sv1.pos[0], sv1.pos[2] + 2, 'shambler');
+  z.hp = z.maxHp = 1e6;
+  sv1.vel = [0, 0, 0];
+  const d0 = Math.hypot(sv1.pos[0] - z.pos[0], sv1.pos[2] - z.pos[2]);
+  for (let i = 0; i < 20; i++) { T += 50; room.survivors.think(sv1, 0.05, T); }
+  const d1 = Math.hypot(sv1.pos[0] - z.pos[0], sv1.pos[2] - z.pos[2]);
+  assert.ok(d1 > d0, 'backs away from a threat inside the retreat range');
+  const faceZ = Math.atan2(-(z.pos[0] - sv1.pos[0]), -(z.pos[2] - sv1.pos[2]));
+  assert.ok(Math.abs(Math.atan2(Math.sin(faceZ - sv1.yaw), Math.cos(faceZ - sv1.yaw))) < 0.2, 'keeps facing the threat while backing off');
 
-  // orders only move survivors owned by the player who sent them
-  room.handle(p, { t: 'svassign', id: sv1.id }); // p re-assigns sv1 to themself
-  q.st.p = [sv2.pos[0], 0, sv2.pos[2]];
-  room.handle(q, { t: 'svassign', id: sv2.id }); // q owns sv2
-  room.handle(p, { t: 'svcmd', x: 20, z: 20 });
-  assert.deepEqual(sv1.order, [20, 20], 'p\'s survivor got the order');
-  assert.equal(sv2.order, null, 'q\'s survivor is untouched by p\'s order');
-
-  T += 250; // past the command's own cooldown
-  room.handle(p, { t: 'svcmd', x: 0, z: 0 }); // aimed inside the Core ring: clears orders
-  assert.equal(sv1.order, null);
+  // dragged far outside the leash, it drifts back toward the Core on its own
+  sv1.pos[0] = room.map.core.x + 40; sv1.pos[2] = room.map.core.z; sv1.vel = [0, 0, 0]; sv1.hp = sv1.maxHp;
+  const before = Math.hypot(sv1.pos[0] - room.map.core.x, sv1.pos[2] - room.map.core.z);
+  for (let i = 0; i < 100; i++) { T += 50; room.survivors.think(sv1, 0.05, T); }
+  const after = Math.hypot(sv1.pos[0] - room.map.core.x, sv1.pos[2] - room.map.core.z);
+  assert.ok(after < before, 'drifted back toward the Core once past the leash');
 });
 
 test('Core cannon: fires at a zombie in range with line of sight during a wave', () => {

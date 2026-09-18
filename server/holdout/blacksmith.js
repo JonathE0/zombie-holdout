@@ -1,12 +1,13 @@
-// The Blacksmith: an NPC who sets up an anvil beside the Core once the first Brood Titan falls (wave 10).
+// The Blacksmith: an NPC who sets up an anvil beside the Core once wave 7 is cleared.
 // Talk to him (E) to forge tier III guns and armor, infuse guns with an element, fit attachments, and
 // upgrade turrets (damage, range, fire rate, ammo, incendiary / frost rounds, armor plating).
 import { ATTACH } from '../../shared/items.js';
-import { SMITH } from '../../shared/holdout.js';
+import { SMITH, TURRET_TYPES } from '../../shared/holdout.js';
 import { ELEMENTS } from '../../shared/elements.js';
 import { ARMOR_SLOTS } from '../../shared/items.js';
 import { giveItem } from './inventory.js';
 import { nextUid } from '../baseRoom.js';
+import { FORCED_EL } from './defenses.js';
 
 export { SMITH };
 
@@ -30,7 +31,7 @@ export class Blacksmith {
   // m: { t: 'smith', op: 'forge' | 'infuse' | 'fit' | 'turret', uid?, el?, id?, def?, up? }
   handle(p, m) {
     const room = this.room, deny = text => room.send(p, { t: 'deny', text });
-    if (!room.bosses.smith) return deny('The Blacksmith arrives after the first Brood Titan falls');
+    if (!room.bosses.smith) return deny('The Blacksmith arrives once wave 7 is cleared');
     if (!this.near(p)) return deny('Talk to the Blacksmith at his anvil');
     if (m.op === 'forge') return room.inventory.onTierUp(p, { uid: m.uid }, true);
     if (m.op === 'infuse') {
@@ -54,7 +55,8 @@ export class Blacksmith {
       room.send(p, { t: 'msg', text: `${a.name} fitted` });
     } else if (m.op === 'turret') {
       const d = room.defenses.list.get(m.def | 0), u = SMITH.turret[m.up];
-      if (!d || (d.type !== 'turret' && d.type !== 'rturret') || !u) return;
+      if (!d || !TURRET_TYPES.includes(d.type) || !u) return;
+      if ((m.up === 'inc' || m.up === 'frost') && FORCED_EL[d.type]) return deny('This turret already has its own element');
       d.mods ??= {};
       if (m.up === 'ammo') {
         if (!this.pay(p, u.price)) return;

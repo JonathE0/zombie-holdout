@@ -1,4 +1,4 @@
-// Zombie Holdout inventory window (I): a Minecraft-style grid — armor slots beside a figure with your stats,
+// Zombie Holdout inventory window (E or I): a Minecraft-style grid — armor slots beside a figure with your stats,
 // the 18-slot backpack, the 6-slot hotbar, ammo / material counters and (at the Core's team chest) the
 // shared chest grid. Drag items between slots with the in-game cursor (or the real mouse when it is free),
 // drop them outside the window to throw them on the ground, shift-click to quick-move. The server checks

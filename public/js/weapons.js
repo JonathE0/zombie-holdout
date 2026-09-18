@@ -178,8 +178,7 @@ export class Weapons {
     if (w.scope && !this.scope) base = a.unscoped;
     if (!this.scope && this.cur.item?.att?.rail === 'laser') base *= 0.7; // laser sight
     const mf = Math.min(1, Math.max(0, (pl.speed - w.speed * 0.34) / (w.speed * 0.66)));
-    const airAccurate = this.g.mode?.airAccurate && w.id === 'ssg08' && !pl.grounded;
-    return base + (airAccurate ? 0 : a.move * mf + (pl.grounded ? 0 : a.air)) + this.bloom;
+    return base + a.move * mf + (pl.grounded ? 0 : a.air) + this.bloom;
   }
 
   altPressed() {

@@ -204,23 +204,6 @@ def('hold_item', { mode: 'hold', name: 'Item', short: 'Item', cat: 'item', model
 
 export const WEAPONS = W;
 
-export const GEAR = {
-  kevlar: { id: 'kevlar', name: 'Kevlar Vest', price: 650 },
-  helmet: { id: 'helmet', name: 'Kevlar + Helmet', price: 1000, upgrade: 350 },
-  ammo: { id: 'ammo', name: 'Ammo Refill', price: 300 }, // Zombie Holdout only
-};
-
-export const BUY_MENU = [
-  ['Pistols', ['glock', 'usp', 'p250', 'deagle']],
-  ['SMGs', ['mac10', 'mp9', 'p90']],
-  ['Heavy', ['nova']],
-  ['Rifles', ['galil', 'ak47', 'm4a4', 'm4a1s']],
-  ['Snipers', ['ssg08', 'awp']],
-  ['Gear', ['kevlar', 'helmet']],
-];
-
-export const ECON = { start: 800, max: 16000, win: 3250, lossBonus: [1400, 1900, 2400, 2900, 3400], warmup: 16000 };
-export const DEFAULT_PISTOL = { T: 'glock', CT: 'usp' };
 export const PART_MULT = { chest: 1, arm: 1, stomach: 1.25, legs: 0.75 };
 const RANGE_UNIT = 12.7; // CS range modifiers apply per 500 units (12.7 m)
 

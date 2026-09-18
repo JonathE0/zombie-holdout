@@ -4,6 +4,7 @@
 import { P, moveCharacter, rayWorld } from '../../shared/physics.js';
 import { distToBox, boxCenter } from '../../shared/build.js';
 import { AGGRO } from '../../shared/zombies.js';
+import { SURVIVOR_CLASSES } from '../../shared/holdout.js';
 import { stepSniper, tryBurrow, stepBurrow, onMeleeHit } from './behaviors.js';
 
 export const ZS = { MOVE: 0, WIND: 1, STRIKE: 2, LOB: 3 }; // also the animation state sent to clients
@@ -37,7 +38,8 @@ function think(room, z, now) {
   let best = null, bd = t.ranged ? t.range : (t.aggro ?? AGGRO) + (now - z.hurtAt < 3000 ? 8 : 0);
   for (const p of room.targets()) { // players and survivors
     if (!p.alive || p.downed) continue;
-    const pp = p.st.p, d = Math.hypot(pp[0] - pos[0], pp[2] - pos[2]);
+    const pp = p.st.p, raw = Math.hypot(pp[0] - pos[0], pp[2] - pos[2]);
+    const d = p.isSurvivor && p.cls === 'guardian' ? raw * SURVIVOR_CLASSES.guardian.aggroMult : raw; // Guardians draw zombies
     if (d >= bd) continue;
     if (!t.ranged && !room.lineOfSight(eye, [pp[0], pp[1] + 1.4, pp[2]])) continue;
     best = p;

@@ -3,18 +3,16 @@
 // health, downs and revives; clients report movement and hit claims (validated against where each target
 // was over the last few hundred ms).
 import { WEAPONS, computeDamage } from '../../shared/weapons.js';
-import { modeOf } from '../../shared/modes.js';
 import { OUTPOST, OUTPOST_STATIC, OUTPOST_PROPS, PROP_TYPES, OUTPOST_NODES, NODE_TYPES } from '../../shared/outpost.js';
 import { armorStats, damageReduction, gunMult } from '../../shared/items.js';
 import { EL } from '../../shared/elements.js';
 import { shieldBlocks, bloaterBurst, addHazard, updateHazards, updateSpecials, updatePlayerEffects, playerEffect } from './behaviors.js';
 import { BMATS, MAT_IDS, KINDS, PIECE_COST, REPAIR_HP_PER_MAT, START_FRAC, REFUND, REACH, pieceBox, pieceBoxes, slotKey, checkPlacement, distToBox, validMask, unsupported } from '../../shared/build.js';
 import { ZTYPES, ZTYPE_IDS, ZCLASSES, ZCLASS_IDS, ZDROPS, CORE_ARMOR, coreHp, bossHp, bossFor, variantChance } from '../../shared/zombies.js';
-import { ITEMS, RARITY, POWERUPS, BUFF, AMMO, MAT_CAP, MONEY_CAP, CLASSES, intermissionFor, rollLoot } from '../../shared/holdout.js';
+import { ITEMS, RARITY, POWERUPS, BUFF, AMMO, MAT_CAP, MONEY_CAP, CLASSES, SURVIVOR_CLASSES, intermissionFor, rollLoot, rollDeploy } from '../../shared/holdout.js';
 import { rayWorld, blocked } from '../../shared/physics.js';
 import { BoxGrid } from '../../shared/boxgrid.js';
 import { BaseRoom, nextUid } from '../baseRoom.js';
-import { PARTS } from '../room.js';
 import { FlowField } from './flowfield.js';
 import { Director } from './director.js';
 import { updateZombies, updateProjectiles } from './ai.js';
@@ -40,6 +38,7 @@ const wrap = a => Math.atan2(Math.sin(a), Math.cos(a));
 const clamp16 = v => Math.max(-32767, Math.min(32767, Math.round(v)));
 const MARK_MULT = 1.25; // Skybreaker's "mark" perk: +25% damage from every source while marked
 const isBuild = s => s.kind !== 'prop';
+const PARTS = new Set(['head', 'chest', 'arm', 'stomach', 'legs']);
 const cloneBox = b => ({ ...b, min: [...b.min], max: [...b.max] });
 const pieceTuple = s => [s.id, KINDS.indexOf(s.kind), s.i, s.k, s.l, s.o ?? 0, MAT_IDS.indexOf(s.mat), Math.round(s.hp), s.maxHp, Math.round(s.grow), Math.round(s.rate), s.owner, s.mask | 0];
 const pieceUpdate = s => [s.id, MAT_IDS.indexOf(s.mat), Math.round(s.hp), s.maxHp, Math.round(s.grow), Math.round(s.rate)];
@@ -63,13 +62,11 @@ export class HoldoutRoom extends BaseRoom {
   constructor(code, opts = {}) {
     super();
     this.code = code;
-    this.mode = modeOf('zombies');
-    this.maxPlayers = this.mode.maxPlayers;
+    this.maxPlayers = 4;
     this.diffId = 'endless'; // one curve: the waves just keep getting harder
     this.diff = 1;
     this.rng = opts.rng || Math.random;
     this.players = [];
-    this.vsBot = false;
     this.public = false;
     this.host = null;
     this.map = OUTPOST;
@@ -130,6 +127,7 @@ export class HoldoutRoom extends BaseRoom {
     this.coreHealAt = 0;
     this.flowDirty = true;
     Object.assign(this, { flowAt: 0, aiAcc: 0, snapAt: 0, pieceAt: 0, statAt: 0, rosterAt: 0, lastStat: '', coreAlarmAt: 0, golemWaveAlert: -1, seekerAlertAt: 0 });
+    this.chestSniperTaken = new Set(); // Colossus-wave chest snipers: one per player, reset with the world
     this.events.refreshChests(HOLDOUT.chests);
   }
 
@@ -161,7 +159,7 @@ export class HoldoutRoom extends BaseRoom {
     const p = this.makePlayer(name, ws);
     this.players.push(p);
     this.host ??= p.id;
-    this.send(p, { t: 'welcome', id: p.id, code: this.code, bot: false, rules: { winRounds: 0, buyGrace: 0 }, gameMode: this.mode.id, diff: this.diffId });
+    this.send(p, { t: 'welcome', id: p.id, code: this.code, maxPlayers: this.maxPlayers, diff: this.diffId });
     this.syncWorld(p);
     this.spawn(p);
     if (this.phase === 'lobby') this.core.hp = this.core.max = coreHp(this.activeCount());
@@ -229,7 +227,13 @@ export class HoldoutRoom extends BaseRoom {
       this.director.plan(1);
       this.broadcastPhase();
     } else if ((this.phase === 'intermission' || this.phase === 'prep') && this.phaseEnd - now > HOLDOUT.readySkip) {
+      const skippedSec = (this.phaseEnd - now - HOLDOUT.readySkip) / 1000;
       this.phaseEnd = now + HOLDOUT.readySkip;
+      if (skippedSec >= 10) {
+        const reward = Math.min(600, Math.round(12 * skippedSec));
+        for (const p of this.players) { p.money = Math.min(MONEY_CAP, p.money + reward); this.sendInv(p); }
+        this.broadcast({ t: 'msg', text: `Skipped early: +$${reward} each` });
+      }
       this.broadcastPhase();
     }
   }
@@ -267,7 +271,7 @@ export class HoldoutRoom extends BaseRoom {
   waveCleared() {
     const w = this.wave;
     for (const p of this.players) {
-      if (p.cls === 'medic') for (const [id, n] of [['bandage', 2], ['medkit', 1]]) { const left = giveItem(p, makeItem(id, n)); if (left) this.inventory.dropNear(p, left); }
+      if (p.cls === 'medic' && w % 2 === 0) { const left = giveItem(p, makeItem('medkit', 1)); if (left) this.inventory.dropNear(p, left); }
       p.money = Math.min(MONEY_CAP, p.money + 800 + 100 * w);
       for (const m of MAT_IDS) p.mats[m] = Math.min(MAT_CAP, p.mats[m] + HOLDOUT.waveMats[m]);
       if (p.downed) this.revive(p, null);
@@ -281,8 +285,12 @@ export class HoldoutRoom extends BaseRoom {
     this.phaseEnd = Date.now() + intermissionFor(w);
     this.director.plan(w + 1);
     if (w % 3 === 0) this.events.refreshChests(HOLDOUT.chests);
+    if (w === 7 && !this.bosses.smith) { this.bosses.smith = true; this.onSmithUnlocked(); }
     const next = bossFor(w + 1);
-    if (next === 'sky') this.broadcast({ t: 'task', text: 'Something huge darkens the sky next wave — buy a sniper rifle at the Core!' });
+    if (next === 'sky') {
+      this.broadcast({ t: 'task', text: "Something huge darkens the sky next wave — the squad's sniper rifles are waiting in the team chest, one each!" });
+      this.inventory.giveChestSnipers(this.players.length);
+    }
     if (this.director.planned?.night) this.broadcast({ t: 'task', text: 'Night falls next wave — zombies will be hard to see. Flashlights help!' });
     this.broadcastPhase();
     this.broadcastRoster();
@@ -528,6 +536,7 @@ export class HoldoutRoom extends BaseRoom {
     if (p.isSurvivor) return this.survivors.hurt(p, dmg);
     if (!p.alive || p.downed || this.phase !== 'wave') return;
     dmg *= 1 - damageReduction(p.as?.def ?? 0); // armor
+    if (p.cls === 'tank') dmg *= 1 - CLASSES.tank.dr; // Tank: takes less damage (and never gets knocked back or stunned — zombies don't do either to players)
     p.hurtAt = Date.now();
     let left = dmg;
     if (p.shield > 0) { const a = Math.min(p.shield, left); p.shield -= a; left -= a; } // shields soak damage first
@@ -583,14 +592,14 @@ export class HoldoutRoom extends BaseRoom {
   }
 
   // attacker: the zombie dealing the hit (or a { id, t } stand-in for a projectile splash), optional.
-  // Zombies deal 65% damage to pieces/props (not the Core), further scaled down the more of them are
+  // Zombies deal 45% damage to pieces/props (not the Core), further scaled down the more of them are
   // hitting the same piece at once (each hit remembered for 1.5 s). Wall breakers ignore both cuts.
   damagePiece(s, dmg, attacker = null) {
     if (attacker && !attacker.t?.breaker) {
       const now = Date.now(), hitters = s.hitters ??= new Map();
       hitters.set(attacker.id, now);
       for (const [id, at] of hitters) if (now - at > 1500) hitters.delete(id);
-      dmg *= 0.65 / (1 + 0.3 * (hitters.size - 1));
+      dmg *= 0.45 / (1 + 0.45 * (hitters.size - 1));
     }
     s.hp -= dmg;
     this.flowDirty = true;
@@ -620,6 +629,7 @@ export class HoldoutRoom extends BaseRoom {
     if (player) {
       player.money = Math.min(MONEY_CAP, player.money + reward);
       player.stats.kills++;
+      if (player.cls === 'assault') player.assaultBuffUntil = Date.now() + CLASSES.assault.killRateMs; // +fire rate briefly after a kill
       if (this.rng() < 0.25) player.mats.metal += 3; // scrap
       this.sendInv(player);
       // now and then a zombie drops a few rounds for the gun that killed it (ammo is otherwise bought)
@@ -644,13 +654,16 @@ export class HoldoutRoom extends BaseRoom {
     this.broadcast({ t: 'zdie', id: z.id, by: killer?.isSurvivor ? 'sv' + killer.id : killer?.id ?? null, hs, w: wId });
   }
 
-  // Some zombies carry something worth taking (shared/zombies.js DROPS), and at night any of them may drop a flashlight.
+  // Some zombies carry something worth taking (shared/zombies.js DROPS), elite/large ones can also drop a
+  // trap or turret (deployOdds, weighted by shared/holdout.js DEPLOY_WEIGHT), and at night any of them may
+  // drop a flashlight.
   typeDrop(z) {
     const at = [z.pos[0], z.pos[1] + 0.2, z.pos[2]], d = ZDROPS[z.type];
     if (d && this.rng() < d.chance) {
       const w = typeof d.gun === 'function' ? d.gun(this.wave) : d.gun;
       this.inventory.spawn({ kind: 'gun', w, r: Math.min(4, 1 + Math.floor(this.rng() * 3)), tier: 1, el: null }, at);
     }
+    if (z.t.deployOdds && this.rng() < z.t.deployOdds) this.inventory.spawn({ kind: 'item', id: rollDeploy(this.rng), n: 1 }, at);
     if (this.director.night && this.rng() < 0.08) this.inventory.spawn({ kind: 'item', id: 'flashlight', n: 1 }, at);
   }
 
@@ -660,7 +673,8 @@ export class HoldoutRoom extends BaseRoom {
     if (!w || !p.alive || p.downed || p.carrying || !this.hasWeapon(p, m.w)) return;
     const now = Date.now();
     const gunnery = 1 + 0.06 * (this.teamUps?.gunnery || 0);
-    const gap = (w.cat === 'melee' ? (m.alt ? 900 : 350) : 60000 / w.rpm) * 0.7 / ((this.buffActive('rate') ? BUFF.rate : 1) * gunnery);
+    const assaultBuff = p.cls === 'assault' && now < (p.assaultBuffUntil || 0) ? 1 + CLASSES.assault.killRate : 1;
+    const gap = (w.cat === 'melee' ? (m.alt ? 900 : 350) : 60000 / w.rpm) * 0.7 / ((this.buffActive('rate') ? BUFF.rate : 1) * gunnery * assaultBuff);
     if (now - (p.lastShot[m.w] || 0) < gap) return;
     p.lastShot[m.w] = now;
     this.broadcast({ t: 'shot', id: p.id, w: m.w, o: m.o, d: m.d, e: m.e, alt: !!m.alt }, p);
@@ -861,7 +875,7 @@ export class HoldoutRoom extends BaseRoom {
     const mat = BMATS[piece.mat], eng = this.teamUps?.engineering || 0, maxHp = this.pieceMaxHp(piece.mat);
     Object.assign(piece, { id: this.nextSid++, owner: owner?.id ?? null, maxHp, hp: maxHp * START_FRAC, mask: 0 });
     piece.grow = maxHp - piece.hp;
-    piece.rate = (piece.grow / mat.time) * (1 + 0.2 * eng);
+    piece.rate = (piece.grow / mat.time) * (1 + 0.2 * eng) * (owner?.cls === 'tank' ? CLASSES.tank.buildMul : 1);
     piece.box = pieceBox(piece);          // full bounds (reach / distance checks)
     piece.boxes = pieceBoxes(piece);      // what actually collides (changes with edits)
     this.pieces.set(piece.id, piece);
@@ -937,7 +951,7 @@ export class HoldoutRoom extends BaseRoom {
     s.mat = next;
     s.maxHp = maxHp;
     s.grow += add;
-    s.rate = (s.grow / BMATS[next].time) * (1 + 0.2 * (this.teamUps?.engineering || 0));
+    s.rate = (s.grow / BMATS[next].time) * (1 + 0.2 * (this.teamUps?.engineering || 0)) * (p.cls === 'tank' ? CLASSES.tank.buildMul : 1);
     s.box.mat = BMATS[next].code;
     for (const b of s.boxes) b.mat = BMATS[next].code;
     this.flowDirty = true;
@@ -951,7 +965,7 @@ export class HoldoutRoom extends BaseRoom {
     if (!s || now - p.lastRepair < 180) return;
     const missing = s.maxHp - s.hp - s.grow;
     if (missing < 1) return;
-    const cap = 40 * (1 + 0.2 * (this.teamUps?.engineering || 0)); // engineering: more HP per repair action, same mats per HP
+    const cap = 40 * (1 + 0.2 * (this.teamUps?.engineering || 0)) * (p.cls === 'tank' ? CLASSES.tank.buildMul : 1); // engineering + Tank: more HP per repair action, same mats per HP
     const heal = Math.min(missing, cap, p.mats[s.mat] * REPAIR_HP_PER_MAT);
     if (heal < 1) return this.send(p, { t: 'deny', text: `Not enough ${s.mat}` });
     p.lastRepair = now;
@@ -1019,6 +1033,10 @@ export class HoldoutRoom extends BaseRoom {
     const c = CLASSES[m.id];
     if (!c || p.cls === m.id) return;
     if (this.phase === 'wave') return this.send(p, { t: 'deny', text: 'Change class between waves' });
+    if (this.phase === 'intermission' && this.wave % 5 !== 0) {
+      const next = Math.ceil((this.wave + 1) / 5) * 5;
+      return this.send(p, { t: 'deny', text: `Kits are locked until the break after wave ${next}` });
+    }
     if (this.started() && !this.canBuy(p)) return this.send(p, { t: 'deny', text: 'Change class at the Core' });
     const old = p.maxHp || 200;
     p.cls = m.id;
@@ -1030,6 +1048,7 @@ export class HoldoutRoom extends BaseRoom {
   }
 
   // Medics: heal themselves after a few quiet seconds and everyone standing near them (players and survivors).
+  // Medic-class survivors do the same on a much smaller scale (SURVIVOR_CLASSES.medic).
   updateMedics(now) {
     if (now - (this.medicAt || 0) < 250) return;
     this.medicAt = now;
@@ -1039,6 +1058,16 @@ export class HoldoutRoom extends BaseRoom {
       if (now - (m.hurtAt || 0) > 3000) this.healPlayer(m, M.regen * 0.25);
       for (const q of this.players) if (q !== m && q.alive && !q.downed && Math.hypot(q.st.p[0] - m.st.p[0], q.st.p[2] - m.st.p[2]) <= M.auraR) this.healPlayer(q, M.aura * 0.25);
       for (const sv of this.survivors.list.values()) if (sv.state === 'active' && Math.hypot(sv.pos[0] - m.st.p[0], sv.pos[2] - m.st.p[2]) <= M.auraR) this.survivors.heal(sv, M.aura * 0.25 * 1.5);
+      if (m.shield < ITEMS.shield.cap && this.canBuy(m)) { // Medic passive: shield regen near the Core
+        m.shield = Math.min(ITEMS.shield.cap, m.shield + M.coreShieldRegen * 0.25);
+        this.send(m, { t: 'vit', hp: Math.round(m.hp), sh: Math.round(m.shield) });
+      }
+    }
+    for (const sv of this.survivors.list.values()) {
+      if (sv.state !== 'active' || sv.cls !== 'medic') continue;
+      const C = SURVIVOR_CLASSES.medic;
+      for (const q of this.players) if (q.alive && !q.downed && Math.hypot(q.st.p[0] - sv.pos[0], q.st.p[2] - sv.pos[2]) <= C.healR) this.healPlayer(q, C.heal * 0.25);
+      for (const o of this.survivors.list.values()) if (o !== sv && o.state === 'active' && Math.hypot(o.pos[0] - sv.pos[0], o.pos[2] - sv.pos[2]) <= C.healR) this.survivors.heal(o, C.heal * 0.25 * 1.5);
     }
   }
 
@@ -1077,14 +1106,15 @@ export class HoldoutRoom extends BaseRoom {
       const sv = this.survivors.list.get(m.sv | 0);
       if (!sv || it.kind !== 'heal' || Math.hypot(sv.pos[0] - p.st.p[0], sv.pos[2] - p.st.p[2]) > 3.2) return;
       if (sv.hp >= sv.maxHp * (it.cap / 100)) return deny(`${sv.name} doesn't need that`);
-      this.survivors.heal(sv, Math.min(sv.maxHp * (it.cap / 100) - sv.hp, sv.maxHp * (it.hp / 100) * 1.5));
+      this.survivors.heal(sv, Math.min(sv.maxHp * (it.cap / 100) - sv.hp, sv.maxHp * (it.hp / 100) * 1.5 * (p.cls === 'medic' ? CLASSES.medic.healMul : 1)));
       p.lastUse = now;
       takeItem(p, m.item, 1);
       this.sendInv(p);
       return;
     }
-    if (it.kind === 'heal') { const cap = (it.cap / 100) * p.maxHp; if (p.hp >= cap) return deny('Already healed'); p.hp = Math.min(cap, p.hp + (it.hp / 100) * p.maxHp); }
-    else { if (p.shield >= it.cap) return deny('Shields are full'); p.shield = Math.min(it.cap, p.shield + it.sh); }
+    const healMul = p.cls === 'medic' ? CLASSES.medic.healMul : 1;
+    if (it.kind === 'heal') { const cap = (it.cap / 100) * p.maxHp; if (p.hp >= cap) return deny('Already healed'); p.hp = Math.min(cap, p.hp + (it.hp / 100) * p.maxHp * healMul); }
+    else { if (p.shield >= it.cap) return deny('Shields are full'); p.shield = Math.min(it.cap, p.shield + it.sh * healMul); }
     p.lastUse = now;
     takeItem(p, m.item, 1);
     this.sendInv(p);
@@ -1216,8 +1246,6 @@ export class HoldoutRoom extends BaseRoom {
       case 'place': return this.notYet(p) ? undefined : this.defenses.onPlace(p, m);
       case 'open': return this.notYet(p) ? undefined : this.events.onOpen(p, m);
       case 'carry': return this.survivors.onCarry(p, m);
-      case 'svassign': return this.survivors.onAssign(p, m);
-      case 'svcmd': return this.survivors.onCommand(p, m);
       case 'coreup': return this.cannon.onBuy(p, String(m.id), !!m.bank);
       case 'coreheal': return this.onCoreHeal(p);
       case 'class': return this.onClass(p, m);
