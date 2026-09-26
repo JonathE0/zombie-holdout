@@ -28,4 +28,5 @@ and how they were solved.
 ## Releasing
 - `origin` is https://github.com/JonathE0/zombie-holdout (branch `master`). Netlify builds the browser solo
   version from it on every push (`netlify.toml` → `npm run build:static` → `dist/`), so pushing is deploying.
-- After pushing, mirror the tracked files into `../AI_Games/fragline/` and commit + push that repo too.
+- After pushing, run `npm run mirror`: it copies the tracked files into `../AI_Games/fragline/`, commits with this
+  repo's last subject line and pushes that repo too. Never edit the game inside AI_Games — this repo is the source.
