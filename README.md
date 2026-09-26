@@ -392,3 +392,11 @@ public/js/holdout.js Zombie Holdout client (+ zombies.js horde, build.js pieces/
                      boss_gravekeeper.js the Gravekeeper's gear, graves and lightning)
 .claude/agents/      fragline-builder: the Sonnet implementation agent (see CLAUDE.md for the Opus/Sonnet split)
 ```
+
+## Backups
+
+Old source snapshots, kept out of the way of the current game:
+
+- `backups/fragline/pre-holdout/` — the 1v1 Counter-Strike-style shooter it started as.
+- `backups/fragline/pre-phase3/` — Zombie Holdout before the endless-wave rework.
+- `backups/fragline/pre-standalone/` — the last version that still carried the 1v1 modes alongside Zombie Holdout.
